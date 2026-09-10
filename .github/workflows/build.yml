@@ -1,99 +1,94 @@
-# Копия для репозитория iamxvbaba/gramsrv-Telegram-iOS
-# Целевой путь в репо: .github/workflows/build.yml (заменить существующий)
-# Что чинит относительно старого: macos-13 -> macos-26 (нужен Xcode 26.2
-# из versions.json), checkout@v2 -> v4, убраны удаленные
-# actions/create-release@v1 и upload-release-asset@v1, артефакт
-# переименован Telegram.ipa -> LunaGram.ipa. Подпись та же фейковая
-# (build-system/fake-codesigning) — .ipa без подписи, ставится через
-# Sideloadly / AltStore / TrollStore со своей подписью.
-name: LunaGram iOS IPA
-
-permissions:
-  contents: write
+name: CI
 
 on:
-  workflow_dispatch:
-    inputs:
-      build_number:
-        description: 'Build number override (empty = auto from git count + offset)'
-        required: false
-        default: ''
   push:
-    branches: [master]
-    paths: ['.github/workflows/build.yml']
+    branches: [ master ]
+
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-26
-    timeout-minutes: 360
+
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: false
-          fetch-depth: 0
+          submodules: 'recursive'
+          fetch-depth: '0'
 
-      - name: Fix relative submodule URLs
+      - name: Set active Xcode path
         run: |
-          # .gitmodules has relative URLs (../tgcalls.git, ../rlottie.git)
-          # which resolve to nonexistent neptun42/* in the fork.
-          # Replace them with upstream TelegramMessenger repos via sed.
-          sed -i.bak 's|url=../tgcalls.git|url=https://github.com/TelegramMessenger/tgcalls.git|g' .gitmodules
-          sed -i.bak 's|url=../rlottie.git|url=https://github.com/TelegramMessenger/rlottie.git|g' .gitmodules
-          rm -f .gitmodules.bak
-          cat .gitmodules
-          git submodule sync --recursive
-          git submodule update --init --recursive --jobs 8
+          XCODE_VERSION=$(cat versions.json | python3 -c 'import json,sys;obj=json.load(sys.stdin);print(obj["xcode"]);')
+          sudo xcode-select -s /Applications/Xcode_$XCODE_VERSION.app/Contents/Developer
 
-      - name: Select Xcode from versions.json
+      - name: Create canonical source directory
         run: |
-          XCODE_VERSION=$(python3 -c 'import json;print(json.load(open("versions.json"))["xcode"])')
-          echo "Required Xcode: $XCODE_VERSION"
-          ls /Applications | grep -i xcode || true
-          sudo xcode-select -s /Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer
-          xcodebuild -version
-
-      - name: Canonical source dir
-        run: |
+          set -x
           sudo mkdir -p /Users/Shared
-          rm -rf /Users/Shared/telegram-ios
-          cp -R "$GITHUB_WORKSPACE" /Users/Shared/telegram-ios
+          cp -R $GITHUB_WORKSPACE /Users/Shared/
+          mv /Users/Shared/$(basename $GITHUB_WORKSPACE) /Users/Shared/telegram-ios
 
-      - name: Build unsigned IPA
+      - name: Build the App
         run: |
-          cd /Users/Shared/telegram-ios
-          BUILD_NUMBER="${{ inputs.build_number }}"
-          if [ -z "$BUILD_NUMBER" ]; then
-            OFFSET=$(cat build_number_offset)
-            COUNT=$(git rev-list --count HEAD)
-            BUILD_NUMBER=$((COUNT + OFFSET))
-          fi
-          echo "BUILD_NUMBER=$BUILD_NUMBER" >> $GITHUB_ENV
+          set -x
+
+          # source code paths are included in the final binary, so we need to make them stable across builds
+          SOURCE_DIR=/Users/Shared/telegram-ios
+
+          # use canonical bazel root
+          BAZEL_USER_ROOT="/private/var/tmp/_bazel_containerhost"
+
+          cd $SOURCE_DIR
+
+          BUILD_NUMBER_OFFSET="$(cat build_number_offset)"
+
+          export APP_VERSION=$(cat versions.json | python3 -c 'import json,sys;obj=json.load(sys.stdin);print(obj["app"]);')
+          export COMMIT_COUNT=$(git rev-list --count HEAD)
+          export COMMIT_COUNT="$(($COMMIT_COUNT+$BUILD_NUMBER_OFFSET))"
+          export BUILD_NUMBER="$COMMIT_COUNT"
+          echo "BUILD_NUMBER=$(echo $BUILD_NUMBER)" >> $GITHUB_ENV
+          echo "APP_VERSION=$(echo $APP_VERSION)" >> $GITHUB_ENV
+
           python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs
           python3 -u build-system/Make/Make.py \
-            --bazelUserRoot=/private/var/tmp/_bazel_containerhost \
+            --bazelUserRoot="$BAZEL_USER_ROOT" \
             build \
-            --configurationPath=build-system/appstore-configuration.json \
+            --configurationPath="build-system/appstore-configuration.json" \
             --codesigningInformationPath=build-system/fake-codesigning \
             --configuration=release_arm64 \
             --buildNumber="$BUILD_NUMBER"
-          mkdir -p build/artifacts
-          if [ -f bazel-bin/Telegram/Telegram.ipa ]; then
-            cp bazel-bin/Telegram/Telegram.ipa build/artifacts/LunaGram.ipa
-          else
-            cp bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/Telegram.ipa build/artifacts/LunaGram.ipa
-          fi
-          ls -la build/artifacts/
+
+          # collect ipa
+          OUTPUT_PATH="build/artifacts"
+          rm -rf "$OUTPUT_PATH"
+          mkdir -p "$OUTPUT_PATH"
+          for f in bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/Telegram.ipa; do
+            cp "$f" $OUTPUT_PATH/
+          done
+
+          # collect dsym
+          mkdir -p build/DSYMs
+          for f in bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/*.dSYM; do
+            cp -R "$f" build/DSYMs/
+          done
+          zip -r "./$OUTPUT_PATH/Telegram.DSYMs.zip" build/DSYMs 1>/dev/null
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LunaGram-${{ env.BUILD_NUMBER }}
-          path: /Users/Shared/telegram-ios/build/artifacts/LunaGram.ipa
+          name: Telegram-ipa
+          path: /Users/Shared/telegram-ios/build/artifacts/Telegram.ipa
+          if-no-files-found: error
 
-      - name: Release
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: lunagram-${{ env.BUILD_NUMBER }}
-          name: LunaGram iOS (${{ env.BUILD_NUMBER }})
-          body: Unsigned LunaGram iOS build (fake codesigning). Sideload with Sideloadly / AltStore / TrollStore.
-          files: /Users/Shared/telegram-ios/build/artifacts/LunaGram.ipa
+          tag_name: build-${{ env.BUILD_NUMBER }}
+          name: Telegram ${{ env.APP_VERSION }} (${{ env.BUILD_NUMBER }})
+          body: |
+            An unsigned build of Telegram for iOS ${{ env.APP_VERSION }} (${{ env.BUILD_NUMBER }})
+          draft: false
+          prerelease: false
+          files: |
+            /Users/Shared/telegram-ios/build/artifacts/Telegram.ipa
+            /Users/Shared/telegram-ios/build/artifacts/Telegram.DSYMs.zip
