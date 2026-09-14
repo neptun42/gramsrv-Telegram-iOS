@@ -31,11 +31,13 @@ jobs:
 
       - name: Fix relative submodule URLs
         run: |
-          # .gitmodules uses ../tgcalls.git and ../rlottie.git which resolve to
-          # nonexistent neptun42/* in the fork. Point them at upstream until
-          # custom forks exist.
-          git config submodule.submodules/rlottie/rlottie.url https://github.com/TelegramMessenger/rlottie.git
-          git config submodule.submodules/TgVoipWebrtc/tgcalls.url https://github.com/TelegramMessenger/tgcalls.git
+          # .gitmodules has relative URLs (../tgcalls.git, ../rlottie.git)
+          # which resolve to nonexistent neptun42/* in the fork.
+          # Replace them with upstream TelegramMessenger repos via sed.
+          sed -i.bak 's|url=../tgcalls.git|url=https://github.com/TelegramMessenger/tgcalls.git|g' .gitmodules
+          sed -i.bak 's|url=../rlottie.git|url=https://github.com/TelegramMessenger/rlottie.git|g' .gitmodules
+          rm -f .gitmodules.bak
+          cat .gitmodules
           git submodule sync --recursive
           git submodule update --init --recursive --jobs 8
 
