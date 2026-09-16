@@ -8,6 +8,9 @@
 # Sideloadly / AltStore / TrollStore со своей подписью.
 name: LunaGram iOS IPA
 
+permissions:
+  contents: write
+
 on:
   workflow_dispatch:
     inputs:
